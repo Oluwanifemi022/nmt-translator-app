@@ -1,0 +1,12 @@
+streamlit
+torch
+transformers
+gtts
+langdetect
+PyMuPDF
+pytesseract
+Pillow
+python-docx
+SpeechRecognition
+pydub
+pandas
