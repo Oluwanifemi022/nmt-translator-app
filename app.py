@@ -655,6 +655,9 @@ defaults = {
     "last_src": "", "last_tgt": "",
     "prev_text": "", "prev_tgt": "",
     "favorites": load_favorites(),
+    "doc_result": None,
+    "img_result": None,
+    "voice_result": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -801,6 +804,19 @@ if page == "Translator":
         )
         if source_text.strip():
             copy_button(source_text, "src")
+            src_listen_col, _ = st.columns([1, 3])
+            with src_listen_col:
+                if st.button("🔊 Listen", key="listen_src", use_container_width=True):
+                    src_gtts_code = (
+                        LANGUAGES[auto_detect(source_text)]["gtts"] if use_auto
+                        else LANGUAGES[source_lang]["gtts"]
+                    )
+                    with st.spinner("Generating audio..."):
+                        src_audio = speak(source_text, src_gtts_code, slow=slow_speech)
+                    if src_audio:
+                        st.audio(src_audio)
+                    else:
+                        st.warning("Couldn't generate audio for this text/language.")
 
     with col_tgt:
         st.markdown("<div class='result-label'>Translation</div>", unsafe_allow_html=True)
@@ -819,12 +835,15 @@ if page == "Translator":
                     use_container_width=True
                 )
             with dl2:
-                if st.session_state.last_tgt and st.session_state.last_tgt in LANGUAGES:
-                    tgt_gtts_dl = LANGUAGES[st.session_state.last_tgt]["gtts"]
-                    audio_dl = speak(st.session_state.result.splitlines()[0],
-                                      tgt_gtts_dl, slow=slow_speech)
-                    if audio_dl:
-                        st.audio(audio_dl)
+                if st.button("🔊 Listen", key="listen_tgt", use_container_width=True):
+                    if st.session_state.last_tgt and st.session_state.last_tgt in LANGUAGES:
+                        tgt_gtts_dl = LANGUAGES[st.session_state.last_tgt]["gtts"]
+                        with st.spinner("Generating audio..."):
+                            audio_dl = speak(st.session_state.result, tgt_gtts_dl, slow=slow_speech)
+                        if audio_dl:
+                            st.audio(audio_dl)
+                        else:
+                            st.warning("Couldn't generate audio for this text/language.")
             with dl3:
                 if st.button("★ Save", use_container_width=True, key="fav_btn"):
                     add_favorite(source_text, st.session_state.result,
@@ -1000,12 +1019,9 @@ elif page == "Documents":
                 src_lang_doc = doc_src
                 if doc_auto:
                     src_lang_doc = auto_detect(sections[0]["text"][:200])
-                    st.markdown("<div class='info-row'>Detected: <strong>" +
-                                lang_tag(src_lang_doc) + "</strong></div>", unsafe_allow_html=True)
 
                 src_nllb = LANGUAGES[src_lang_doc]["nllb"]
                 tgt_nllb = LANGUAGES[doc_tgt]["nllb"]
-                tgt_gtts = LANGUAGES[doc_tgt]["gtts"]
                 model    = get_model(doc_tgt, yo_model, ig_model, ha_model)
 
                 all_translations = []
@@ -1020,48 +1036,74 @@ elif page == "Documents":
                         "page": p["page"], "original": p["text"],
                         "translation": "\n".join(trans)
                     })
-
-                st.success("Done — " + str(len(all_translations)) + " section(s) translated")
-
-                for item in all_translations:
-                    with st.expander("Section " + str(item["page"])):
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.markdown("<div class='lang-label'>Original</div>", unsafe_allow_html=True)
-                            st.text_area("", value=item["original"], height=180, disabled=True,
-                                         key="orig_" + str(item["page"]), label_visibility="collapsed")
-                        with c2:
-                            st.markdown("<div class='result-label'>" + lang_tag(doc_tgt) + "</div>",
-                                        unsafe_allow_html=True)
-                            st.text_area("", value=item["translation"], height=180, disabled=True,
-                                         key="tr_" + str(item["page"]), label_visibility="collapsed")
+                prog.empty()
 
                 full = "\n\n".join([
                     "=== SECTION " + str(x["page"]) + " ===\n" + x["translation"]
                     for x in all_translations
                 ])
-                st.download_button(
-                    "Download full translation", data=full,
-                    file_name="translated_" + os.path.splitext(uploaded_doc.name)[0] + ".txt",
-                    mime="text/plain", use_container_width=True
-                )
+
+                # Store everything needed to render the results in session_state
+                # so it survives later reruns (Save/Download/Listen clicks, etc.)
+                # instead of vanishing the instant another widget is touched.
+                st.session_state.doc_result = {
+                    "filename": uploaded_doc.name,
+                    "src_lang": src_lang_doc,
+                    "tgt_lang": doc_tgt,
+                    "all_translations": all_translations,
+                    "full": full,
+                }
 
                 out_path = BASE + "/document_translation.txt"
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(full)
-                st.markdown("<div class='back-trans'>Saved to Drive</div>", unsafe_allow_html=True)
-
-                if all_translations:
-                    first = all_translations[0]["translation"].splitlines()[0]
-                    audio = speak(first, tgt_gtts)
-                    if audio:
-                        st.audio(audio)
 
                 st.session_state.history.append({
                     "From": src_lang_doc, "To": doc_tgt,
                     "Source": "Doc: " + uploaded_doc.name,
                     "Translation": str(len(all_translations)) + " sections"
                 })
+
+    # Render the last translated document, if any -- kept outside the button
+    # block so it stays visible across reruns (e.g. clicking Download/Listen).
+    doc_res = st.session_state.doc_result
+    if doc_res:
+        st.success("Done — " + str(len(doc_res["all_translations"])) + " section(s) translated")
+
+        if doc_res["src_lang"]:
+            st.markdown("<div class='info-row'>Detected: <strong>" +
+                        lang_tag(doc_res["src_lang"]) + "</strong></div>", unsafe_allow_html=True)
+
+        for item in doc_res["all_translations"]:
+            with st.expander("Section " + str(item["page"])):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("<div class='lang-label'>Original</div>", unsafe_allow_html=True)
+                    st.text_area("", value=item["original"], height=180, disabled=True,
+                                 key="orig_" + str(item["page"]), label_visibility="collapsed")
+                with c2:
+                    st.markdown("<div class='result-label'>" + lang_tag(doc_res["tgt_lang"]) + "</div>",
+                                unsafe_allow_html=True)
+                    st.text_area("", value=item["translation"], height=180, disabled=True,
+                                 key="tr_" + str(item["page"]), label_visibility="collapsed")
+
+        dcol1, dcol2 = st.columns(2)
+        with dcol1:
+            st.download_button(
+                "Download full translation", data=doc_res["full"],
+                file_name="translated_" + os.path.splitext(doc_res["filename"])[0] + ".txt",
+                mime="text/plain", use_container_width=True, key="doc_dl"
+            )
+        with dcol2:
+            if st.button("🔊 Listen to first section", key="doc_listen", use_container_width=True):
+                tgt_gtts = LANGUAGES[doc_res["tgt_lang"]]["gtts"]
+                first_translation = doc_res["all_translations"][0]["translation"]
+                with st.spinner("Generating audio..."):
+                    audio = speak(first_translation, tgt_gtts)
+                if audio:
+                    st.audio(audio)
+                else:
+                    st.warning("Couldn't generate audio for this text/language.")
 
 # ---------------------------------------------------------------------------
 # PAGE: IMAGE
@@ -1115,62 +1157,95 @@ elif page == "Image":
                 src_lang_img = img_src
                 if img_auto:
                     src_lang_img = auto_detect(text_to_use[:200])
-                    st.markdown("<div class='info-row'>Detected: <strong>" +
-                                lang_tag(src_lang_img) + "</strong></div>", unsafe_allow_html=True)
 
                 src_nllb = LANGUAGES[src_lang_img]["nllb"]
                 tgt_nllb = LANGUAGES[img_tgt]["nllb"]
-                tgt_gtts = LANGUAGES[img_tgt]["gtts"]
                 model    = get_model(img_tgt, yo_model, ig_model, ha_model)
 
                 with st.spinner("Translating on CPU..."):
                     lines  = [l for l in text_to_use.splitlines() if l.strip()]
                     result = "\n".join(translate_batch(lines, nllb_tokenizer, model, tgt_nllb, src_nllb))
 
-                st.markdown("<div class='result-label'>" + lang_tag(img_tgt) + "</div>",
-                            unsafe_allow_html=True)
-                st.text_area("", value=result, height=200, disabled=True,
-                             key="img_result", label_visibility="collapsed")
-                copy_button(result, "img_res")
-
+                conf = None
                 if show_conf and lines:
                     conf = get_confidence(lines[0], nllb_tokenizer, model, src_nllb, tgt_nllb)
-                    st.markdown(conf_html(conf), unsafe_allow_html=True)
 
+                back = None
                 if show_back and result:
                     back_model = get_model(src_lang_img, yo_model, ig_model, ha_model)
                     back = translate_nllb(result.splitlines()[0], nllb_tokenizer,
                                            back_model, src_nllb, tgt_nllb)
-                    st.markdown(
-                        "<div class='back-trans'><span style='color:" + INK_SOFT + ";"
-                        "font-weight:600;font-size:11px;text-transform:uppercase'>"
-                        "Back-translation</span><br>"
-                        "<span style='font-size:13px'>" + back + "</span></div>",
-                        unsafe_allow_html=True
-                    )
-
-                audio = speak(result.splitlines()[0], tgt_gtts, slow=slow_speech)
-                if audio:
-                    st.audio(audio)
-
-                if st.button("★ Save to favorites", key="img_fav"):
-                    add_favorite(text_to_use, result, src_lang_img, img_tgt)
-                    st.success("Saved to favorites")
 
                 combined = ("=== ORIGINAL (OCR) ===\n" + text_to_use +
                             "\n\n=== TRANSLATION (" + img_tgt + ") ===\n" + result)
-                st.download_button("Download result", data=combined,
-                                    file_name="image_translation.txt", mime="text/plain",
-                                    use_container_width=True)
-
                 out_path = BASE + "/image_translation.txt"
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(combined)
+
+                # Store everything needed to render the result in session_state
+                # so it survives later reruns (Save/Download/Listen clicks, etc.)
+                # instead of vanishing the instant another widget is touched.
+                st.session_state.img_result = {
+                    "filename": uploaded_img.name,
+                    "text_to_use": text_to_use,
+                    "src_lang": src_lang_img,
+                    "tgt_lang": img_tgt,
+                    "result": result,
+                    "conf": conf,
+                    "back": back,
+                    "combined": combined,
+                }
 
                 st.session_state.history.append({
                     "From": src_lang_img, "To": img_tgt,
                     "Source": "Image: " + uploaded_img.name, "Translation": result[:60]
                 })
+
+    # Render the last translated image result, if any -- kept outside the
+    # button block so it stays visible across reruns (e.g. clicking Save/Download).
+    img_res = st.session_state.img_result
+    if img_res:
+        if img_res["src_lang"]:
+            st.markdown("<div class='info-row'>Detected: <strong>" +
+                        lang_tag(img_res["src_lang"]) + "</strong></div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='result-label'>" + lang_tag(img_res["tgt_lang"]) + "</div>",
+                    unsafe_allow_html=True)
+        st.text_area("", value=img_res["result"], height=200, disabled=True,
+                     key="img_result_box", label_visibility="collapsed")
+        copy_button(img_res["result"], "img_res")
+
+        if img_res["conf"] is not None:
+            st.markdown(conf_html(img_res["conf"]), unsafe_allow_html=True)
+
+        if img_res["back"]:
+            st.markdown(
+                "<div class='back-trans'><span style='color:" + INK_SOFT + ";"
+                "font-weight:600;font-size:11px;text-transform:uppercase'>"
+                "Back-translation</span><br>"
+                "<span style='font-size:13px'>" + img_res["back"] + "</span></div>",
+                unsafe_allow_html=True
+            )
+
+        ic1, ic2, ic3 = st.columns(3)
+        with ic1:
+            if st.button("🔊 Listen", key="img_listen", use_container_width=True):
+                tgt_gtts = LANGUAGES[img_res["tgt_lang"]]["gtts"]
+                with st.spinner("Generating audio..."):
+                    audio = speak(img_res["result"], tgt_gtts, slow=slow_speech)
+                if audio:
+                    st.audio(audio)
+                else:
+                    st.warning("Couldn't generate audio for this text/language.")
+        with ic2:
+            if st.button("★ Save to favorites", key="img_fav", use_container_width=True):
+                add_favorite(img_res["text_to_use"], img_res["result"],
+                             img_res["src_lang"], img_res["tgt_lang"])
+                st.success("Saved to favorites")
+        with ic3:
+            st.download_button("Download result", data=img_res["combined"],
+                                file_name="image_translation.txt", mime="text/plain",
+                                use_container_width=True, key="img_dl")
 
     st.markdown("<hr>", unsafe_allow_html=True)
     st.markdown(
@@ -1231,33 +1306,55 @@ elif page == "Voice":
 
                 if err:
                     st.error(err)
+                    st.session_state.voice_result = None
                 elif text:
-                    st.markdown("<div class='lang-label'>Transcript</div>", unsafe_allow_html=True)
-                    st.text_area("", value=text, height=100, disabled=True,
-                                 key="voice_transcript", label_visibility="collapsed")
-
                     with st.spinner("Translating on CPU..."):
                         result = run_translation(text, voice_src, voice_tgt)
 
-                    st.markdown("<div class='result-label'>" + lang_tag(voice_tgt) + "</div>",
-                                unsafe_allow_html=True)
-                    st.text_area("", value=result, height=100, disabled=True,
-                                 key="voice_result", label_visibility="collapsed")
-                    copy_button(result, "voice_res")
-
-                    tgt_gtts = LANGUAGES[voice_tgt]["gtts"]
-                    audio_out = speak(result.splitlines()[0], tgt_gtts, slow=slow_speech)
-                    if audio_out:
-                        st.audio(audio_out)
-
-                    if st.button("★ Save to favorites", key="voice_fav"):
-                        add_favorite(text, result, voice_src, voice_tgt)
-                        st.success("Saved to favorites")
+                    # Store everything needed to render the result in session_state
+                    # so it survives later reruns (e.g. clicking Save to favorites).
+                    st.session_state.voice_result = {
+                        "filename": uploaded_audio.name,
+                        "transcript": text,
+                        "src_lang": voice_src,
+                        "tgt_lang": voice_tgt,
+                        "result": result,
+                    }
 
                     st.session_state.history.append({
                         "From": voice_src, "To": voice_tgt,
                         "Source": "Voice: " + uploaded_audio.name, "Translation": result[:60]
                     })
+
+        # Render the last transcript/translation, if any -- kept outside the
+        # button block so it stays visible across reruns (e.g. Save/Listen clicks).
+        voice_res = st.session_state.voice_result
+        if voice_res:
+            st.markdown("<div class='lang-label'>Transcript</div>", unsafe_allow_html=True)
+            st.text_area("", value=voice_res["transcript"], height=100, disabled=True,
+                         key="voice_transcript_box", label_visibility="collapsed")
+
+            st.markdown("<div class='result-label'>" + lang_tag(voice_res["tgt_lang"]) + "</div>",
+                        unsafe_allow_html=True)
+            st.text_area("", value=voice_res["result"], height=100, disabled=True,
+                         key="voice_result_box", label_visibility="collapsed")
+            copy_button(voice_res["result"], "voice_res")
+
+            vc1, vc2 = st.columns(2)
+            with vc1:
+                if st.button("🔊 Listen", key="voice_listen", use_container_width=True):
+                    tgt_gtts = LANGUAGES[voice_res["tgt_lang"]]["gtts"]
+                    with st.spinner("Generating audio..."):
+                        audio_out = speak(voice_res["result"], tgt_gtts, slow=slow_speech)
+                    if audio_out:
+                        st.audio(audio_out)
+                    else:
+                        st.warning("Couldn't generate audio for this text/language.")
+            with vc2:
+                if st.button("★ Save to favorites", key="voice_fav", use_container_width=True):
+                    add_favorite(voice_res["transcript"], voice_res["result"],
+                                 voice_res["src_lang"], voice_res["tgt_lang"])
+                    st.success("Saved to favorites")
 
 # ---------------------------------------------------------------------------
 # PAGE: FAVORITES
